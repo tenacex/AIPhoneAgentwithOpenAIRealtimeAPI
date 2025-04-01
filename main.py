@@ -61,7 +61,7 @@ async def handle_media_stream(websocket: WebSocket):
 
     async with websockets.connect(
         'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01',
-        extra_headers={
+        additional_headers={
             "Authorization": f"Bearer {OPENAI_API_KEY}",
             "OpenAI-Beta": "realtime=v1"
         }
@@ -81,7 +81,7 @@ async def handle_media_stream(websocket: WebSocket):
             try:
                 async for message in websocket.iter_text():
                     data = json.loads(message)
-                    if data['event'] == 'media' and openai_ws.open:
+                    if data['event'] == 'media':
                         latest_media_timestamp = int(data['media']['timestamp'])
                         audio_append = {
                             "type": "input_audio_buffer.append",
@@ -99,24 +99,22 @@ async def handle_media_stream(websocket: WebSocket):
                             mark_queue.pop(0)
                     elif data['event'] == 'stop':
                         logger.info("Twilio call ended. Closing connections.")
-                        if openai_ws.open:
-                            logger.info("Closing OpenAI WebSocket.")
-                            await openai_ws.close()
-                            await log_websocket_status(openai_ws)
+                        logger.info("Closing OpenAI WebSocket.")
+                        await openai_ws.close()
+                        await log_websocket_status(openai_ws)
                         return
             except WebSocketDisconnect:
                 print("Client disconnected.")
-                if openai_ws.open:
-                    await openai_ws.close()
-           
-       async def log_websocket_status(ws):
-            """Utility function to log the state of the WebSocket connection."""
-            if ws.open:
-                logger.info("OpenAI WebSocket is still open.")
-            else:
-                 logger.info("OpenAI WebSocket is now closed.")
+                await openai_ws.close()
 
-        
+        async def log_websocket_status(ws):
+            """Utility function to log the state of the WebSocket connection."""
+            try:
+                await ws.ping()
+                logger.info("OpenAI WebSocket is still open.")
+            except:
+                logger.info("OpenAI WebSocket is now closed.")
+
         async def send_to_twilio():
             """Receive events from the OpenAI Realtime API, send audio back to Twilio."""
             nonlocal stream_sid, last_assistant_item, response_start_timestamp_twilio
@@ -209,7 +207,7 @@ async def send_initial_conversation_item(openai_ws):
             "content": [
                 {
                     "type": "input_text",
-                    "text": "Greet the user with 'Hello there! I am an AI voice assistant that will help you with any questions you may have. Please ask me anything you want to know.'"
+                    "text": "Greet the user with 'Hello there! Thanks for connecting with Craft Commons. I'm a virtual assistant that will help you with any questions you may have. Can I help you find the best course for you?'"
                 }
             ]
         }
@@ -240,5 +238,4 @@ async def send_session_update(openai_ws):
 if __name__ == "__main__":
   import uvicorn
   uvicorn.run(app, host="0.0.0.0", port=PORT)
-
 
