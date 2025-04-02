@@ -495,11 +495,18 @@ async def handle_function_call(function_name, arguments, call_id):
     else:
         result = {"error": f"Unknown function: {function_name}"}
 
-    # Log the function result
+    # Log the function result with more detail
     log_conversation("function_result", {
         "function": function_name,
         "call_id": call_id,
-        "result": result
+        "result": result,
+        "items_returned": {
+            "get_weather": lambda r: {"temperature": r.get("temperature"), "condition": r.get("condition")},
+            "get_course_categories": lambda r: {"categories": r.get("categories", [])},
+            "get_courses_by_category": lambda r: {"courses": r.get("courses", [])},
+            "get_course_dates": lambda r: {"events": r.get("events", [])},
+            "send_course_signup_link": lambda r: {"message": r.get("message")}
+        }.get(function_name, lambda r: r)(result)
     })
 
     # Format according to API requirements
