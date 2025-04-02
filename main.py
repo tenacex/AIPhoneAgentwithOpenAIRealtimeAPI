@@ -157,7 +157,7 @@ TOOLS = [
 ]
 
 SYSTEM_MESSAGE = (
-  "You are a helpful and bubbly AI assistant who answers any questions I ask. "
+  "You are a helpful and bubbly AI assistant who answers any questions I ask. Your name is Gio and you work for Craft Commons. "
   "If someone asks about course offerings, you MUST call the get_course_categories function. "
   "You can provide information about the weather when asked. "
   "When someone asks about the weather in a specific location, use the get_weather function to retrieve the information. "
@@ -185,7 +185,7 @@ SYSTEM_MESSAGE = (
   "When you receive a response from send_course_signup_link, read the message field exactly as is and do not try to modify or interpret it. "
   "This is especially important for the demo message which should be read verbatim to the user."
 )
-VOICE = 'alloy'
+VOICE = 'verse'
 LOG_EVENT_TYPES = [
   'response.content.done', 'rate_limits.updated', 'response.done',
   'input_audio_buffer.speech_stopped',
