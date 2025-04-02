@@ -759,7 +759,6 @@ async def receive_from_twilio(websocket, openai_ws, shared_state):
         })
         await openai_ws.close()
 
-
 async def send_to_twilio(websocket, openai_ws, shared_state):
     """Receive events from the OpenAI Realtime API, send audio back to Twilio."""
     audio_sent_counter = 0  # Counter for audio packets sent
@@ -769,9 +768,19 @@ async def send_to_twilio(websocket, openai_ws, shared_state):
             "stream_sid": shared_state.get("stream_sid"),
             "timestamp": datetime.utcnow().isoformat()
         })
+
         async for openai_message in openai_ws:
             try:
                 response = json.loads(openai_message)
+
+                # 🔥 NEW: Handle function call outputs
+                if response.get("type") == "conversation.item.create" and response["item"].get("type") == "function_call_output":
+                    await openai_ws.send(json.dumps(response))
+                    await openai_ws.send(json.dumps({
+                        "type": "response.create"
+                    }))
+                    continue
+
                 response_type = response.get('type', 'unknown')
 
                 # Log important conversation events
@@ -795,7 +804,7 @@ async def send_to_twilio(websocket, openai_ws, shared_state):
                     try:
                         # Decode base64 audio payload
                         raw_audio = base64.b64decode(response['delta'])
-                        
+
                         # Re-encode for Twilio
                         audio_payload = base64.b64encode(raw_audio).decode('utf-8')
                         audio_delta = {
@@ -810,9 +819,9 @@ async def send_to_twilio(websocket, openai_ws, shared_state):
                         if shared_state["stream_sid"]:
                             await websocket.send_json(audio_delta)
                             audio_sent_counter += 1
-                            
+
                             # Send mark events for interruption handling
-                            if audio_sent_counter % 5 == 0:  # Send mark every 5 audio packets
+                            if audio_sent_counter % 5 == 0:
                                 await send_mark(websocket, shared_state)
                     except Exception as e:
                         log_conversation("audio_processing_error", {
@@ -835,7 +844,7 @@ async def send_to_twilio(websocket, openai_ws, shared_state):
                             "timestamp": datetime.utcnow().isoformat()
                         })
                         await handle_speech_started_event(openai_ws, websocket, shared_state)
-                        
+
                         # Reset state after handling interruption
                         shared_state["last_assistant_item"] = None
                         shared_state["response_start_timestamp_twilio"] = None
