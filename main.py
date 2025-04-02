@@ -48,6 +48,17 @@ TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER')
 MAIN_API_URL = os.getenv('MAIN_API_URL')
 ORG_ID = os.getenv('ORG_ID')
 
+# Add detailed logging to verify environment variables
+logger.info("=== Environment Variables Debug ===")
+logger.info(f"Current working directory: {os.getcwd()}")
+logger.info(f"Environment file location: {os.path.abspath('.env')}")
+logger.info(f"TWILIO_ACCOUNT_SID: {TWILIO_ACCOUNT_SID}")
+logger.info(f"TWILIO_AUTH_TOKEN length: {len(TWILIO_AUTH_TOKEN) if TWILIO_AUTH_TOKEN else 0}")
+logger.info(f"TWILIO_PHONE_NUMBER: {TWILIO_PHONE_NUMBER}")
+logger.info(f"MAIN_API_URL: {MAIN_API_URL}")
+logger.info(f"ORG_ID: {ORG_ID}")
+logger.info("===================================")
+
 if not OPENAI_API_KEY:
     raise ValueError('Missing the OpenAI API key. Please set it in the .env file.')
 if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN or not TWILIO_PHONE_NUMBER:
@@ -56,7 +67,10 @@ if not MAIN_API_URL or not ORG_ID:
     raise ValueError('Missing API configuration. Please set MAIN_API_URL and ORG_ID in the .env file.')
 
 # Initialize Twilio client
-twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+twilio_client = Client(
+    os.getenv('TWILIO_ACCOUNT_SID'),
+    os.getenv('TWILIO_AUTH_TOKEN')
+)
 
 PORT = int(os.getenv('PORT', 5050))
 MODEL = os.getenv('OPENAI_MODEL', 'gpt-4o-mini-realtime-preview')
@@ -120,11 +134,31 @@ TOOLS = [
             },
             "required": ["activity_id"]
         }
+    },
+    {
+        "type": "function",
+        "name": "send_course_signup_link",
+        "description": "Send a signup link for a specific course event to a phone number",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "event_id": {
+                    "type": "string",
+                    "description": "The unique ID of the course event to sign up for"
+                },
+                "phone_number": {
+                    "type": "string",
+                    "description": "The phone number to send the signup link to"
+                }
+            },
+            "required": ["event_id", "phone_number"]
+        }
     }
 ]
 
 SYSTEM_MESSAGE = (
   "You are a helpful and bubbly AI assistant who answers any questions I ask. "
+  "If someone asks about course offerings, you MUST call the get_course_categories function. "
   "You can provide information about the weather when asked. "
   "When someone asks about the weather in a specific location, use the get_weather function to retrieve the information. "
   "When someone asks about available courses or wants to see what courses are offered, use the get_course_categories function to get a summary of categories and course counts. "
@@ -134,6 +168,11 @@ SYSTEM_MESSAGE = (
   "1. First, guide them to select a category (we specialize in woodworking). "
   "2. Then help them choose a specific course from that category. "
   "3. Once they've selected a course, use the get_course_dates function to show them available dates. "
+  "When someone wants to sign up for a course: "
+  "1. First, confirm which specific date they want to sign up for. "
+  "2. Then ask if they want to receive the signup link via text message to their current phone number. "
+  "3. If they say yes, use the send_course_signup_link function with their current phone number. "
+  "4. If they want to use a different number, ask them for the number and then use send_course_signup_link with that number. "
   "When presenting course information, speak naturally and conversationally as if you're talking to a friend. "
   "Instead of listing courses mechanically, weave the information into a natural conversation. "
   "For example, instead of saying 'I found 3 woodworking courses: Course A, Course B, Course C', "
@@ -141,6 +180,10 @@ SYSTEM_MESSAGE = (
   "and for those with more experience, we offer Advanced Woodworking. We also have a popular Furniture Making class.' "
   "Always speak naturally and conversationally. If the user asks about something outside your capabilities, "
   "let them know what you can help with instead."
+  "If people ask for courses in a specific category, YOU MUST first call the get_course_categories tool and then you can call the get_courses_by_category tool. You do not know what courses we offer until you call this tool."
+  "Keep your answers short. Please try and summarize and do not say more than 4 sentences in a row without asking another question. Your goal is to lead people into the proper course."
+  "When you receive a response from send_course_signup_link, read the message field exactly as is and do not try to modify or interpret it. "
+  "This is especially important for the demo message which should be read verbatim to the user."
 )
 VOICE = 'alloy'
 LOG_EVENT_TYPES = [
@@ -301,7 +344,8 @@ async def get_course_dates(activity_id):
     """Fetch upcoming dates and times for a specific course."""
     logger.info(f"get_course_dates function called for activity_id: {activity_id}")
     try:
-        url = f"{MAIN_API_URL}/api/chat/{activity_id}/event"
+        url = f"{MAIN_API_URL}/api/chat/{ORG_ID}/activity/{activity_id}/event"
+        logger.info(f"Fetching events from: {url}")
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as response:
                 if response.status == 200:
@@ -315,7 +359,7 @@ async def get_course_dates(activity_id):
                         schedule = event.get("schedule", {})
                         schedule_type = event.get("schedule_type", "single")
                         
-                        if schedule_type == "single":
+                        if schedule_type == "single_day":
                             # Single day course
                             formatted_event = {
                                 "name": event.get("name", "Unnamed Event"),
@@ -327,7 +371,7 @@ async def get_course_dates(activity_id):
                                 "is_free": event.get("is_free", False)
                             }
                             formatted_events.append(formatted_event)
-                        else:
+                        elif isinstance(schedule, list):
                             # Multiple day course
                             for day in schedule:
                                 formatted_event = {
@@ -340,14 +384,47 @@ async def get_course_dates(activity_id):
                                     "is_free": event.get("is_free", False)
                                 }
                                 formatted_events.append(formatted_event)
+                        else:
+                            # Handle case where schedule is neither single nor list
+                            logger.warning(f"Unexpected schedule format for event: {event}")
+                            continue
                     
                     # Sort events by date
                     formatted_events.sort(key=lambda x: x["date"])
                     
+                    if not formatted_events:
+                        return {
+                            "success": False,
+                            "error": "I couldn't find any upcoming dates for this course at the moment."
+                        }
+                    
+                    # Group events by month
+                    from datetime import datetime
+                    events_by_month = {}
+                    for event in formatted_events:
+                        date = datetime.strptime(event["date"], "%Y-%m-%d")
+                        month_key = date.strftime("%B %Y")
+                        if month_key not in events_by_month:
+                            events_by_month[month_key] = []
+                        events_by_month[month_key].append(event)
+                    
+                    # Format the response message
+                    message = "Here are the upcoming dates for this course:\n\n"
+                    for month, month_events in events_by_month.items():
+                        message += f"{month}:\n"
+                        for event in month_events:
+                            # Convert 24h time to 12h format
+                            time = datetime.strptime(event["time"], "%H:%M").strftime("%I:%M %p")
+                            # Format duration in hours
+                            duration_hours = event["duration"] / 60
+                            message += f"- {event['date']} at {time} ({duration_hours} hours)\n"
+                        message += "\n"
+                    
                     return {
                         "success": True,
                         "events": formatted_events,
-                        "message": "Here are the upcoming dates for this course. Please present them in a natural, conversational way."
+                        "events_by_month": events_by_month,
+                        "message": message
                     }
                 else:
                     return {
@@ -356,10 +433,21 @@ async def get_course_dates(activity_id):
                     }
     except Exception as e:
         logger.error(f"Error fetching course dates: {str(e)}")
+        logger.error(traceback.format_exc())
         return {
             "success": False,
             "error": "I'm having trouble accessing the course schedule right now. Could you please try again in a moment?"
         }
+
+
+async def send_course_signup_link(event_id, phone_number):
+    """Send a signup link for a specific course event to a phone number."""
+    logger.info(f"Demo mode: Would have sent course signup link for event {event_id} to {phone_number}")
+    
+    return {
+        "success": True,
+        "message": "Since this is a demo environment, I will not be sending you a course signup link. Please book a demo to learn more, and start using Workbench to power your craft business. Goodbye!"
+    }
 
 
 async def handle_function_call(function_name, arguments, call_id):
@@ -381,6 +469,11 @@ async def handle_function_call(function_name, arguments, call_id):
         result = await get_courses_by_category(args.get("category_name", ""))
     elif function_name == "get_course_dates":
         result = await get_course_dates(args.get("activity_id", ""))
+    elif function_name == "send_course_signup_link":
+        result = await send_course_signup_link(
+            args.get("event_id", ""),
+            args.get("phone_number", "")
+        )
     else:
         result = {"error": f"Unknown function: {function_name}"}
 
@@ -595,12 +688,21 @@ async def send_to_twilio(websocket, openai_ws, shared_state):
         async for openai_message in openai_ws:
             try:
                 response = json.loads(openai_message)
-                # logger.info(f"Received message from OpenAI: {response}")
                 response_type = response.get('type', 'unknown')
 
                 # Log relevant events from OpenAI
                 if response_type in LOG_EVENT_TYPES:
                     logger.info(f"Received event from OpenAI: {response_type}")
+
+                # Track the assistant item ID for interruption handling
+                if response.get('item_id'):
+                    shared_state["last_assistant_item"] = response['item_id']
+                    logger.debug(f"Updated last_assistant_item to: {response['item_id']}")
+
+                # Set timestamp when response starts (for interruption timing)
+                if response_type == 'response.audio.delta' and shared_state["response_start_timestamp_twilio"] is None:
+                    shared_state["response_start_timestamp_twilio"] = shared_state["latest_media_timestamp"]
+                    logger.debug(f"Set response_start_timestamp_twilio to: {shared_state['response_start_timestamp_twilio']}")
 
                 # Handle function calls in response.done
                 if response_type == 'response.done':
@@ -630,14 +732,11 @@ async def send_to_twilio(websocket, openai_ws, shared_state):
                             logger.info("Triggered new response after function result")
 
                 # Handle audio deltas (streamed audio responses)
-                if response_type == 'response.audio.delta' and 'delta' in response:
+                elif response_type == 'response.audio.delta' and 'delta' in response:
                     try:
-                        # logger.info("Received audio delta from OpenAI")
-
                         # Decode base64 audio payload
                         raw_audio = base64.b64decode(response['delta'])
-                        # logger.debug(f"Decoded audio delta: {len(raw_audio)} bytes")
-
+                        
                         # Re-encode for Twilio
                         audio_payload = base64.b64encode(raw_audio).decode('utf-8')
                         audio_delta = {
@@ -654,16 +753,25 @@ async def send_to_twilio(websocket, openai_ws, shared_state):
                         else:
                             await websocket.send_json(audio_delta)
                             audio_sent_counter += 1
-                            # logger.info(f"Audio packet #{audio_sent_counter} sent to Twilio")
+                            
+                            # Send mark events for interruption handling
+                            if audio_sent_counter % 5 == 0:  # Send mark every 5 audio packets
+                                await send_mark(websocket, shared_state)
                     except Exception as e:
                         logger.error(f"Error processing audio data: {str(e)}")
                         logger.error(traceback.format_exc())
 
                 # Handle speech interruption events
-                if response_type == 'input_audio_buffer.speech_started':
+                elif response_type == 'input_audio_buffer.speech_started':
                     logger.info("Speech started detected.")
                     if shared_state["last_assistant_item"]:
+                        logger.info(f"Interrupting response with item ID: {shared_state['last_assistant_item']}")
                         await handle_speech_started_event(openai_ws, websocket, shared_state)
+                        
+                        # Reset state after handling interruption
+                        shared_state["last_assistant_item"] = None
+                        shared_state["response_start_timestamp_twilio"] = None
+                        shared_state["mark_queue"] = []
 
             except json.JSONDecodeError as e:
                 logger.error(f"Error decoding JSON from OpenAI: {str(e)}")
@@ -675,36 +783,45 @@ async def send_to_twilio(websocket, openai_ws, shared_state):
         logger.error(f"Error in send_to_twilio: {str(e)}")
         logger.error(traceback.format_exc())
 
-
 async def handle_speech_started_event(openai_ws, websocket, shared_state):
     """Handle interruption when the caller's speech starts."""
     logger.info("Handling speech started event.")
-    if shared_state["mark_queue"] and shared_state["response_start_timestamp_twilio"] is not None:
+    
+    try:
+        # Only proceed if we have the necessary data
+        if shared_state["last_assistant_item"] is None:
+            logger.warning("No assistant item ID available for truncation")
+            return
+            
+        if shared_state["response_start_timestamp_twilio"] is None:
+            logger.warning("No response timestamp available for truncation")
+            return
+            
+        # Calculate elapsed time for accurate truncation
         elapsed_time = shared_state["latest_media_timestamp"] - shared_state["response_start_timestamp_twilio"]
-        if SHOW_TIMING_MATH:
-            logger.debug(f"Calculating elapsed time for truncation: {shared_state['latest_media_timestamp']} - {shared_state['response_start_timestamp_twilio']} = {elapsed_time}ms")
+        logger.info(f"Truncating response at {elapsed_time}ms from start")
 
-        if shared_state["last_assistant_item"]:
-            if SHOW_TIMING_MATH:
-                logger.debug(f"Truncating item with ID: {shared_state['last_assistant_item']}, Truncated at: {elapsed_time}ms")
+        # Send truncate event to OpenAI
+        truncate_event = {
+            "type": "conversation.item.truncate",
+            "item_id": shared_state["last_assistant_item"],
+            "content_index": 0,
+            "audio_end_ms": elapsed_time
+        }
+        await openai_ws.send(json.dumps(truncate_event))
+        logger.info(f"Sent truncate event for item: {shared_state['last_assistant_item']}")
 
-            truncate_event = {
-                "type": "conversation.item.truncate",
-                "item_id": shared_state["last_assistant_item"],
-                "content_index": 0,
-                "audio_end_ms": elapsed_time
-            }
-            await openai_ws.send(json.dumps(truncate_event))
-            logger.info(f"Sent truncate event for item: {shared_state['last_assistant_item']}")
-
-        await websocket.send_json({
-            "event": "clear",
-            "streamSid": shared_state["stream_sid"]
-        })
-        logger.info("Sent clear event to Twilio")
-
-        shared_state["mark_queue"].clear()
-
+        # Send clear event to Twilio to stop audio playback immediately
+        if shared_state["stream_sid"]:
+            await websocket.send_json({
+                "event": "clear",
+                "streamSid": shared_state["stream_sid"]
+            })
+            logger.info("Sent clear event to Twilio to stop audio")
+            
+    except Exception as e:
+        logger.error(f"Error in handle_speech_started_event: {str(e)}")
+        logger.error(traceback.format_exc())
 
 async def send_mark(connection, shared_state):
     if shared_state["stream_sid"]:
@@ -731,7 +848,7 @@ async def send_initial_conversation_item(openai_ws):
             "content": [
                 {
                     "type": "input_text",
-                    "text": "Greet the user with 'Hello there! Thanks for connecting with Craft Commons. I'm a virtual assistant that will help you with any questions you may have. Can I help you find the best course for you?'"
+                    "text": "Greet the user with 'Hello there! Thanks for connecting with Craft Commons. I'm a virtual assistant powered by Workbench. What type of courses are you looking for?'"
                 }
             ]
         }
