@@ -682,7 +682,7 @@ async def receive_from_twilio(websocket, openai_ws, shared_state):
     audio_counter = 0  # Counter to limit audio logging
     
     try:
-        logger.info("Starting to receive messages from Twilio")
+        log_event("twilio_receive_start", "Starting to receive messages from Twilio")
         async for message in websocket.iter_text():
             data = json.loads(message)
             event_type = data.get('event')
@@ -697,37 +697,47 @@ async def receive_from_twilio(websocket, openai_ws, shared_state):
                 # Log only occasionally to reduce noise
                 audio_counter += 1
                 if audio_counter % 100 == 0:  # Log every 100th audio packet
-                    logger.debug(f"Received media packet #{audio_counter} from Twilio")
+                    log_event("audio_packet_received", f"Received media packet #{audio_counter} from Twilio")
                 
                 try:
                     await openai_ws.send(json.dumps(audio_append))
                 except Exception as e:
-                    logger.error(f"Error sending audio to OpenAI: {str(e)}")
+                    log_event("audio_send_error", "Error sending audio to OpenAI", {
+                        "error": str(e)
+                    })
                     raise
                     
             elif event_type == 'start':
                 shared_state["stream_sid"] = data['start']['streamSid']
-                logger.info(f"Incoming stream has started {shared_state['stream_sid']}")
+                log_event("stream_started", f"Incoming stream has started", {
+                    "stream_sid": data['start']['streamSid']
+                })
                 
             elif event_type == 'mark':
                 # Only log occasional marks
                 if len(shared_state["mark_queue"]) % 5 == 0:
-                    logger.debug(f"Processing mark event (queue size: {len(shared_state['mark_queue'])})")
+                    log_event("mark_event", f"Processing mark event", {
+                        "queue_size": len(shared_state["mark_queue"])
+                    })
                 
             elif event_type == 'stop':
-                logger.info("Twilio call ended. Closing connections.")
+                log_event("stream_stopped", "Twilio call ended. Closing connections.")
                 await openai_ws.close()
                 return
             
             else:
-                logger.warning(f"Unknown event type from Twilio: {event_type}")
+                log_event("unknown_event", f"Unknown event type from Twilio", {
+                    "event_type": event_type
+                })
                 
     except WebSocketDisconnect:
-        logger.info("Twilio client disconnected.")
+        log_event("websocket_disconnect", "Twilio client disconnected.")
         await openai_ws.close()
     except Exception as e:
-        logger.error(f"Unexpected error in receive_from_twilio: {str(e)}")
-        logger.error(traceback.format_exc())
+        log_event("twilio_receive_error", "Unexpected error in receive_from_twilio", {
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        })
         await openai_ws.close()
 
 
@@ -736,7 +746,7 @@ async def send_to_twilio(websocket, openai_ws, shared_state):
     audio_sent_counter = 0  # Counter for audio packets sent
 
     try:
-        logger.info("Starting to receive messages from OpenAI")
+        log_event("openai_receive_start", "Starting to receive messages from OpenAI")
         async for openai_message in openai_ws:
             try:
                 response = json.loads(openai_message)
@@ -744,26 +754,37 @@ async def send_to_twilio(websocket, openai_ws, shared_state):
 
                 # Log relevant events from OpenAI
                 if response_type in LOG_EVENT_TYPES:
-                    logger.info(f"Received event from OpenAI: {response_type}")
+                    log_event("openai_event", f"Received event from OpenAI", {
+                        "event_type": response_type,
+                        "response": response
+                    })
 
                 # Track the assistant item ID for interruption handling
                 if response.get('item_id'):
                     shared_state["last_assistant_item"] = response['item_id']
-                    logger.debug(f"Updated last_assistant_item to: {response['item_id']}")
+                    log_event("assistant_item_updated", f"Updated last_assistant_item", {
+                        "item_id": response['item_id']
+                    })
 
                 # Set timestamp when response starts (for interruption timing)
                 if response_type == 'response.audio.delta' and shared_state["response_start_timestamp_twilio"] is None:
                     shared_state["response_start_timestamp_twilio"] = shared_state["latest_media_timestamp"]
-                    logger.debug(f"Set response_start_timestamp_twilio to: {shared_state['response_start_timestamp_twilio']}")
+                    log_event("response_started", "Response started", {
+                        "timestamp": shared_state["response_start_timestamp_twilio"]
+                    })
 
                 # Handle function calls in response.done
                 if response_type == 'response.done':
-                    logger.info("Processing response.done event")
+                    log_event("response_done", "Processing response.done event")
                     output_items = response.get('response', {}).get('output', [])
 
                     for item in output_items:
                         if item.get('type') == 'function_call':
-                            logger.info("Detected function call in response.done")
+                            log_event("function_call_detected", "Detected function call in response.done", {
+                                "function_name": item.get('name'),
+                                "arguments": item.get('arguments'),
+                                "call_id": item.get('call_id')
+                            })
                             function_name = item.get('name')
                             function_args = item.get('arguments')
                             call_id = item.get('call_id')
@@ -777,11 +798,13 @@ async def send_to_twilio(websocket, openai_ws, shared_state):
 
                             # Send function result back to OpenAI
                             await openai_ws.send(json.dumps(function_result))
-                            logger.info(f"Sent function result for call_id: {call_id}")
+                            log_event("function_result_sent", f"Sent function result for call_id", {
+                                "call_id": call_id
+                            })
 
                             # Trigger new response after sending function result
                             await openai_ws.send(json.dumps({"type": "response.create"}))
-                            logger.info("Triggered new response after function result")
+                            log_event("new_response_triggered", "Triggered new response after function result")
 
                 # Handle audio deltas (streamed audio responses)
                 elif response_type == 'response.audio.delta' and 'delta' in response:
@@ -801,7 +824,7 @@ async def send_to_twilio(websocket, openai_ws, shared_state):
 
                         # Send audio to Twilio
                         if not shared_state["stream_sid"]:
-                            logger.error("No stream_sid available - cannot send audio to Twilio")
+                            log_event("audio_send_error", "No stream_sid available - cannot send audio to Twilio")
                         else:
                             await websocket.send_json(audio_delta)
                             audio_sent_counter += 1
@@ -810,14 +833,18 @@ async def send_to_twilio(websocket, openai_ws, shared_state):
                             if audio_sent_counter % 5 == 0:  # Send mark every 5 audio packets
                                 await send_mark(websocket, shared_state)
                     except Exception as e:
-                        logger.error(f"Error processing audio data: {str(e)}")
-                        logger.error(traceback.format_exc())
+                        log_event("audio_processing_error", "Error processing audio data", {
+                            "error": str(e),
+                            "traceback": traceback.format_exc()
+                        })
 
                 # Handle speech interruption events
                 elif response_type == 'input_audio_buffer.speech_started':
-                    logger.info("Speech started detected.")
+                    log_event("speech_started", "Speech started detected")
                     if shared_state["last_assistant_item"]:
-                        logger.info(f"Interrupting response with item ID: {shared_state['last_assistant_item']}")
+                        log_event("interrupting_response", f"Interrupting response with item ID", {
+                            "item_id": shared_state["last_assistant_item"]
+                        })
                         await handle_speech_started_event(openai_ws, websocket, shared_state)
                         
                         # Reset state after handling interruption
@@ -826,14 +853,20 @@ async def send_to_twilio(websocket, openai_ws, shared_state):
                         shared_state["mark_queue"] = []
 
             except json.JSONDecodeError as e:
-                logger.error(f"Error decoding JSON from OpenAI: {str(e)}")
-                logger.error(f"Raw message: {openai_message}")
+                log_event("json_decode_error", "Error decoding JSON from OpenAI", {
+                    "error": str(e),
+                    "raw_message": openai_message
+                })
             except Exception as e:
-                logger.error(f"Error processing message from OpenAI: {str(e)}")
-                logger.error(traceback.format_exc())
+                log_event("openai_message_error", "Error processing message from OpenAI", {
+                    "error": str(e),
+                    "traceback": traceback.format_exc()
+                })
     except Exception as e:
-        logger.error(f"Error in send_to_twilio: {str(e)}")
-        logger.error(traceback.format_exc())
+        log_event("openai_receive_error", "Error in send_to_twilio", {
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        })
 
 async def handle_speech_started_event(openai_ws, websocket, shared_state):
     """Handle interruption when the caller's speech starts."""
