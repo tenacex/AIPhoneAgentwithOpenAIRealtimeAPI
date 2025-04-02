@@ -758,8 +758,9 @@ async def receive_from_twilio(websocket, openai_ws, shared_state):
             "timestamp": datetime.utcnow().isoformat()
         })
         await openai_ws.close()
+
 async def send_to_twilio(websocket, openai_ws, shared_state):
-    """Receive events from OpenAI Realtime API, send audio back to Twilio with interruption handling."""
+    """Receive events from the OpenAI Realtime API, send audio back to Twilio."""
     audio_sent_counter = 0  # Counter for audio packets sent
 
     try:
@@ -771,89 +772,19 @@ async def send_to_twilio(websocket, openai_ws, shared_state):
         async for openai_message in openai_ws:
             try:
                 response = json.loads(openai_message)
-                response_type = response.get('type', 'unknown')
 
-                # 🔄 NEW: Handle interruption FIRST before processing other events
-                if response_type == 'input_audio_buffer.speech_started':
-                    log_conversation("speech_started", {
-                        "stream_sid": shared_state.get("stream_sid"),
-                        "timestamp": datetime.utcnow().isoformat()
-                    })
-                    
-                    # ⚡ INTERRUPTION HANDLING CORE ⚡
-                    try:
-                        # 1. Clear Twilio audio buffer immediately
-                        clear_twilio = {
-                            "streamSid": shared_state["stream_sid"],
-                            "event": "clear"
-                        }
-                        await websocket.send_json(clear_twilio)
-                        print('Cleared Twilio buffer.')
-                        
-                        # 2. Cancel OpenAI response generation
-                        interrupt_message = {"type": "response.cancel"}
-                        await openai_ws.send(json.dumps(interrupt_message))
-                        print('Cancelled AI speech generation.')
-                        
-                        # 3. Reset conversation state
-                        shared_state.update({
-                            "last_assistant_item": None,
-                            "response_start_timestamp_twilio": None,
-                            "mark_queue": [],
-                            "is_interrupted": True  # New state flag
-                        })
-                        
-                        log_conversation("interruption_handled", {
-                            "stream_sid": shared_state.get("stream_sid"),
-                            "timestamp": datetime.utcnow().isoformat()
-                        })
-                        continue  # Skip further processing for this event
-
-                    except Exception as e:
-                        log_conversation("interruption_error", {
-                            "stream_sid": shared_state.get("stream_sid"),
-                            "error": str(e),
-                            "traceback": traceback.format_exc(),
-                            "timestamp": datetime.utcnow().isoformat()
-                        })
-
-                # 🔥 Existing function call handling
+                # 🔥 NEW: Handle function call outputs
                 if response.get("type") == "conversation.item.create" and response["item"].get("type") == "function_call_output":
                     await openai_ws.send(json.dumps(response))
-                    await openai_ws.send(json.dumps({"type": "response.create"}))
+                    await openai_ws.send(json.dumps({
+                        "type": "response.create"
+                    }))
                     continue
 
-                # 🎧 Audio handling (now with interruption awareness)
-                if response_type == 'response.audio.delta' and 'delta' in response:
-                    if shared_state.get("is_interrupted"):
-                        continue  # Skip audio processing if interrupted
-                        
-                    try:
-                        raw_audio = base64.b64decode(response['delta'])
-                        audio_payload = base64.b64encode(raw_audio).decode('utf-8')
-                        audio_delta = {
-                            "event": "media",
-                            "streamSid": shared_state["stream_sid"],
-                            "media": {"payload": audio_payload}
-                        }
+                response_type = response.get('type', 'unknown')
 
-                        if shared_state["stream_sid"]:
-                            await websocket.send_json(audio_delta)
-                            audio_sent_counter += 1
-
-                            if audio_sent_counter % 5 == 0:
-                                await send_mark(websocket, shared_state)
-                                
-                    except Exception as e:
-                        log_conversation("audio_processing_error", {
-                            "stream_sid": shared_state.get("stream_sid"),
-                            "error": str(e),
-                            "traceback": traceback.format_exc(),
-                            "timestamp": datetime.utcnow().isoformat()
-                        })
-
-                # 📝 Response completion handling
-                elif response_type == 'response.done':
+                # Log important conversation events
+                if response_type == 'response.done':
                     output_items = response.get('response', {}).get('output', [])
                     for item in output_items:
                         if item.get('type') == 'text':
@@ -867,7 +798,57 @@ async def send_to_twilio(websocket, openai_ws, shared_state):
                                 "arguments": item.get('arguments'),
                                 "call_id": item.get('call_id')
                             })
-                    shared_state["is_interrupted"] = False  # Reset interruption flag
+
+                # Handle audio deltas (streamed audio responses)
+                elif response_type == 'response.audio.delta' and 'delta' in response:
+                    try:
+                        # Decode base64 audio payload
+                        raw_audio = base64.b64decode(response['delta'])
+
+                        # Re-encode for Twilio
+                        audio_payload = base64.b64encode(raw_audio).decode('utf-8')
+                        audio_delta = {
+                            "event": "media",
+                            "streamSid": shared_state["stream_sid"],
+                            "media": {
+                                "payload": audio_payload
+                            }
+                        }
+
+                        # Send audio to Twilio
+                        if shared_state["stream_sid"]:
+                            await websocket.send_json(audio_delta)
+                            audio_sent_counter += 1
+
+                            # Send mark events for interruption handling
+                            if audio_sent_counter % 5 == 0:
+                                await send_mark(websocket, shared_state)
+                    except Exception as e:
+                        log_conversation("audio_processing_error", {
+                            "stream_sid": shared_state.get("stream_sid"),
+                            "error": str(e),
+                            "traceback": traceback.format_exc(),
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+
+                # Handle speech interruption events
+                elif response_type == 'input_audio_buffer.speech_started':
+                    log_conversation("speech_started", {
+                        "stream_sid": shared_state.get("stream_sid"),
+                        "timestamp": datetime.utcnow().isoformat()
+                    })
+                    if shared_state["last_assistant_item"]:
+                        log_conversation("interrupting_response", {
+                            "stream_sid": shared_state.get("stream_sid"),
+                            "item_id": shared_state["last_assistant_item"],
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+                        await handle_speech_started_event(openai_ws, websocket, shared_state)
+
+                        # Reset state after handling interruption
+                        shared_state["last_assistant_item"] = None
+                        shared_state["response_start_timestamp_twilio"] = None
+                        shared_state["mark_queue"] = []
 
             except json.JSONDecodeError as e:
                 log_conversation("json_decode_error", {
@@ -883,7 +864,6 @@ async def send_to_twilio(websocket, openai_ws, shared_state):
                     "traceback": traceback.format_exc(),
                     "timestamp": datetime.utcnow().isoformat()
                 })
-                
     except Exception as e:
         log_conversation("openai_receive_error", {
             "stream_sid": shared_state.get("stream_sid"),
