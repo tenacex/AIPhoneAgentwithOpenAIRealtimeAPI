@@ -4,10 +4,12 @@ import base64
 import asyncio
 import websockets
 import traceback
+import aiohttp
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import HTMLResponse
 from fastapi.websockets import WebSocketDisconnect
 from twilio.twiml.voice_response import VoiceResponse, Connect, Say, Stream
+from twilio.rest import Client
 from dotenv import load_dotenv
 import logging
 import pprint
@@ -40,11 +42,24 @@ websockets_logger.addFilter(WebSocketFilter())
 load_dotenv()
 # Configuration
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')  # requires OpenAI Realtime API Access
+TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
+TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
+TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER')
+MAIN_API_URL = os.getenv('MAIN_API_URL')
+ORG_ID = os.getenv('ORG_ID')
+
 if not OPENAI_API_KEY:
     raise ValueError('Missing the OpenAI API key. Please set it in the .env file.')
+if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN or not TWILIO_PHONE_NUMBER:
+    raise ValueError('Missing Twilio credentials. Please set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_PHONE_NUMBER in the .env file.')
+if not MAIN_API_URL or not ORG_ID:
+    raise ValueError('Missing API configuration. Please set MAIN_API_URL and ORG_ID in the .env file.')
+
+# Initialize Twilio client
+twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
 PORT = int(os.getenv('PORT', 5050))
-MODEL = os.getenv('OPENAI_MODEL', 'gpt-4o-realtime-preview-2024-10-01')
+MODEL = os.getenv('OPENAI_MODEL', 'gpt-4o-mini-realtime-preview')
 
 logger.info(f"Using model: {MODEL}")
 logger.info(f"API key (first/last 4 chars): {OPENAI_API_KEY[:4]}...{OPENAI_API_KEY[-4:]}")
@@ -65,6 +80,46 @@ TOOLS = [
             },
             "required": ["location"]
         }
+    },
+    {
+        "type": "function",
+        "name": "get_course_categories",
+        "description": "Get a summary of all course categories and their counts. Will be called ALWAYS when someone asks about course offerings or categories.",
+        "parameters": {
+            "type": "object",
+            "properties": {},  # No parameters needed
+            "required": []
+        }
+    },
+    {
+        "type": "function",
+        "name": "get_courses_by_category",
+        "description": "Get a list of courses in a specific category. Will be called when someone asks to see what courses are offered in a specific category.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "category_name": {
+                    "type": "string",
+                    "description": "The name of the category to get courses for"
+                }
+            },
+            "required": ["category_name"]
+        }
+    },
+    {
+        "type": "function",
+        "name": "get_course_dates",
+        "description": "Get upcoming dates and times for a specific course",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "activity_id": {
+                    "type": "string",
+                    "description": "The unique ID of the course to get dates for"
+                }
+            },
+            "required": ["activity_id"]
+        }
     }
 ]
 
@@ -72,6 +127,18 @@ SYSTEM_MESSAGE = (
   "You are a helpful and bubbly AI assistant who answers any questions I ask. "
   "You can provide information about the weather when asked. "
   "When someone asks about the weather in a specific location, use the get_weather function to retrieve the information. "
+  "When someone asks about available courses or wants to see what courses are offered, use the get_course_categories function to get a summary of categories and course counts. "
+  "When someone asks about specific types of courses (like woodworking courses), use the get_courses_by_category function to get detailed information about those courses. "
+  "When someone asks about course dates or scheduling: "
+  "Whenever someone asks about course offerings or categories, you MUST call one of the tools."
+  "1. First, guide them to select a category (we specialize in woodworking). "
+  "2. Then help them choose a specific course from that category. "
+  "3. Once they've selected a course, use the get_course_dates function to show them available dates. "
+  "When presenting course information, speak naturally and conversationally as if you're talking to a friend. "
+  "Instead of listing courses mechanically, weave the information into a natural conversation. "
+  "For example, instead of saying 'I found 3 woodworking courses: Course A, Course B, Course C', "
+  "say something like 'We have some great woodworking options! There's a beginner-friendly course called Woodworking Basics, "
+  "and for those with more experience, we offer Advanced Woodworking. We also have a popular Furniture Making class.' "
   "Always speak naturally and conversationally. If the user asks about something outside your capabilities, "
   "let them know what you can help with instead."
 )
@@ -125,7 +192,177 @@ def get_weather(params):
     }
 
 
-def handle_function_call(function_name, arguments, call_id):
+async def get_course_categories():
+    """Fetch the list of categories and their course counts from the external API."""
+    logger.info("get_course_categories function called")
+    try:
+        url = f"{MAIN_API_URL}/api/chat/{ORG_ID}/category"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    categories = await response.json()
+                    logger.info(f"Categories data: {categories}")
+                    
+                    # Format categories into a more readable structure
+                    formatted_categories = []
+                    for category in categories:
+                        formatted_category = {
+                            "name": category.get("name", "Unnamed Category"),
+                            "description": category.get("description", "No description available"),
+                            "course_count": len(category.get("Activity", []))
+                        }
+                        formatted_categories.append(formatted_category)
+                    
+                    return {
+                        "success": True,
+                        "categories": formatted_categories,
+                        "message": f"I found {len(formatted_categories)} categories of courses. Here they are:"
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "error": f"API returned status code {response.status}"
+                    }
+    except Exception as e:
+        logger.error(f"Error fetching categories: {str(e)}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+async def get_courses_by_category(category_name):
+    """Fetch courses in a specific category from the external API."""
+    logger.info(f"get_courses_by_category function called for category: {category_name}")
+    try:
+        # First get the category ID
+        url = f"{MAIN_API_URL}/api/chat/{ORG_ID}/category"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    categories = await response.json()
+                    # Find the category with matching name
+                    target_category = next(
+                        (cat for cat in categories if cat.get("name", "").lower() == category_name.lower()),
+                        None
+                    )
+                    
+                    if not target_category:
+                        return {
+                            "success": False,
+                            "error": f"I couldn't find any courses in the {category_name} category. Would you like to hear about our other course categories instead?"
+                        }
+                    
+                    # Now get the courses for this category
+                    courses_url = f"{MAIN_API_URL}/api/chat/{ORG_ID}/activity?categories={target_category['category_id']}"
+                    async with session.get(courses_url) as courses_response:
+                        if courses_response.status == 200:
+                            courses = await courses_response.json()
+                            
+                            # Format courses into a more readable structure
+                            formatted_courses = []
+                            for course in courses:
+                                formatted_course = {
+                                    "name": course.get("name", "Unnamed Course"),
+                                    "level": course.get("level", "Not specified"),
+                                    "description": course.get("description", "No description available"),
+                                    "price": course.get("price_semester", "Price not specified"),
+                                    "capacity": course.get("capacity", "Capacity not specified"),
+                                    "activity_id": course.get("activity_id", "Activity ID not specified")
+                                }
+                                formatted_courses.append(formatted_course)
+                            
+                            # Return the raw data for the model to generate a natural response
+                            return {
+                                "success": True,
+                                "courses": formatted_courses,
+                                "category_name": category_name,
+                                "message": "Here are the courses I found. Please present them in a natural, conversational way."
+                            }
+                        else:
+                            return {
+                                "success": False,
+                                "error": f"I'm having trouble accessing our course information right now. Could you please try again in a moment?"
+                            }
+                else:
+                    return {
+                        "success": False,
+                        "error": f"I'm having trouble accessing our course information right now. Could you please try again in a moment?"
+                    }
+    except Exception as e:
+        logger.error(f"Error fetching courses by category: {str(e)}")
+        return {
+            "success": False,
+            "error": "I'm having trouble accessing our course information right now. Could you please try again in a moment?"
+        }
+
+
+async def get_course_dates(activity_id):
+    """Fetch upcoming dates and times for a specific course."""
+    logger.info(f"get_course_dates function called for activity_id: {activity_id}")
+    try:
+        url = f"{MAIN_API_URL}/api/chat/{activity_id}/event"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    events = await response.json()
+                    logger.info(f"Events data: {events}")
+                    
+                    # Format events into a more readable structure
+                    formatted_events = []
+                    for event in events:
+                        # Parse the schedule
+                        schedule = event.get("schedule", {})
+                        schedule_type = event.get("schedule_type", "single")
+                        
+                        if schedule_type == "single":
+                            # Single day course
+                            formatted_event = {
+                                "name": event.get("name", "Unnamed Event"),
+                                "date": schedule.get("start_date"),
+                                "time": schedule.get("start_time"),
+                                "duration": schedule.get("duration"),
+                                "price": event.get("price_semester", "Price not specified"),
+                                "capacity": event.get("capacity", "Capacity not specified"),
+                                "is_free": event.get("is_free", False)
+                            }
+                            formatted_events.append(formatted_event)
+                        else:
+                            # Multiple day course
+                            for day in schedule:
+                                formatted_event = {
+                                    "name": event.get("name", "Unnamed Event"),
+                                    "date": day.get("start_date"),
+                                    "time": day.get("start_time"),
+                                    "duration": day.get("duration"),
+                                    "price": event.get("price_semester", "Price not specified"),
+                                    "capacity": event.get("capacity", "Capacity not specified"),
+                                    "is_free": event.get("is_free", False)
+                                }
+                                formatted_events.append(formatted_event)
+                    
+                    # Sort events by date
+                    formatted_events.sort(key=lambda x: x["date"])
+                    
+                    return {
+                        "success": True,
+                        "events": formatted_events,
+                        "message": "Here are the upcoming dates for this course. Please present them in a natural, conversational way."
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "error": f"I'm having trouble accessing the course schedule right now. Could you please try again in a moment?"
+                    }
+    except Exception as e:
+        logger.error(f"Error fetching course dates: {str(e)}")
+        return {
+            "success": False,
+            "error": "I'm having trouble accessing the course schedule right now. Could you please try again in a moment?"
+        }
+
+
+async def handle_function_call(function_name, arguments, call_id):
     """Process function calls and return formatted results."""
     logger.info(f"Handling function call: {function_name} with args: {arguments}")
 
@@ -138,6 +375,12 @@ def handle_function_call(function_name, arguments, call_id):
     # Execute the requested function
     if function_name == "get_weather":
         result = get_weather(args)
+    elif function_name == "get_course_categories":
+        result = await get_course_categories()
+    elif function_name == "get_courses_by_category":
+        result = await get_courses_by_category(args.get("category_name", ""))
+    elif function_name == "get_course_dates":
+        result = await get_course_dates(args.get("activity_id", ""))
     else:
         result = {"error": f"Unknown function: {function_name}"}
 
@@ -352,7 +595,7 @@ async def send_to_twilio(websocket, openai_ws, shared_state):
         async for openai_message in openai_ws:
             try:
                 response = json.loads(openai_message)
-                logger.info(f"Received message from OpenAI: {response}")
+                # logger.info(f"Received message from OpenAI: {response}")
                 response_type = response.get('type', 'unknown')
 
                 # Log relevant events from OpenAI
@@ -372,7 +615,7 @@ async def send_to_twilio(websocket, openai_ws, shared_state):
                             call_id = item.get('call_id')
 
                             # Process the function call
-                            function_result = handle_function_call(
+                            function_result = await handle_function_call(
                                 function_name,
                                 function_args,
                                 call_id
@@ -389,11 +632,11 @@ async def send_to_twilio(websocket, openai_ws, shared_state):
                 # Handle audio deltas (streamed audio responses)
                 if response_type == 'response.audio.delta' and 'delta' in response:
                     try:
-                        logger.info("Received audio delta from OpenAI")
+                        # logger.info("Received audio delta from OpenAI")
 
                         # Decode base64 audio payload
                         raw_audio = base64.b64decode(response['delta'])
-                        logger.debug(f"Decoded audio delta: {len(raw_audio)} bytes")
+                        # logger.debug(f"Decoded audio delta: {len(raw_audio)} bytes")
 
                         # Re-encode for Twilio
                         audio_payload = base64.b64encode(raw_audio).decode('utf-8')
@@ -411,7 +654,7 @@ async def send_to_twilio(websocket, openai_ws, shared_state):
                         else:
                             await websocket.send_json(audio_delta)
                             audio_sent_counter += 1
-                            logger.info(f"Audio packet #{audio_sent_counter} sent to Twilio")
+                            # logger.info(f"Audio packet #{audio_sent_counter} sent to Twilio")
                     except Exception as e:
                         logger.error(f"Error processing audio data: {str(e)}")
                         logger.error(traceback.format_exc())
@@ -506,6 +749,41 @@ async def send_initial_conversation_item(openai_ws):
         logger.error(f"Error sending initial conversation: {str(e)}")
         logger.error(traceback.format_exc())
         raise
+
+
+@app.post("/initiate-call")
+async def initiate_call(request: Request):
+    """Initiate an outbound call to a specified phone number."""
+    try:
+        data = await request.json()
+        to_number = data.get('to')
+        
+        if not to_number:
+            return {"error": "Missing 'to' phone number in request body"}
+            
+        # Get the host from the request
+        host = request.url.hostname
+        
+        # Create the TwiML URL that will be used when the call connects
+        twiml_url = f'https://{host}/incoming-call'
+        
+        # Initiate the call
+        call = twilio_client.calls.create(
+            to=to_number,
+            from_=TWILIO_PHONE_NUMBER,
+            url=twiml_url
+        )
+        
+        return {
+            "success": True,
+            "call_sid": call.sid,
+            "status": call.status
+        }
+        
+    except Exception as e:
+        logger.error(f"Error initiating call: {str(e)}")
+        logger.error(traceback.format_exc())
+        return {"error": str(e)}
 
 
 if __name__ == "__main__":

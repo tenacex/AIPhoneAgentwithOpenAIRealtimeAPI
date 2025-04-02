@@ -8,7 +8,7 @@ This project demonstrates how to create an AI voice assistant that uses Twilio a
 
 The code uses the following resources to function effectively:
 
-Twilio's Python Guide: [Voice AI Assistant with OpenAI Realtime API]( https://www.twilio.com/en-us/blog/voice-ai-assistant-openai-realtime-api-python)
+Twilio's Python Guide: [Voice AI Assistant with OpenAI Realtime API](https://www.twilio.com/en-us/blog/voice-ai-assistant-openai-realtime-api-python)
 
 Twilio Python GitHub Repo Sample: [GitHub - Speech Assistant Sample](https://github.com/twilio-samples/speech-assistant-openai-realtime-api-python)
 
@@ -26,7 +26,7 @@ OpenAI RealtimeEvents: [Realtime Events Documentation](https://platform.openai.c
 
 **How to Use Environment Variables**
 
-For better security, secrets like the OPENAI_API_KEY should be stored in an .env file. Here's how to set it up:
+For better security, secrets should be stored in an .env file. Here's how to set it up:
 
 Create a .env file in the root directory of the project.
 
@@ -34,6 +34,9 @@ Add the following key-value pairs:
 
 ```
 OPENAI_API_KEY=your_openai_api_key_here
+TWILIO_ACCOUNT_SID=your_twilio_account_sid_here
+TWILIO_AUTH_TOKEN=your_twilio_auth_token_here
+TWILIO_PHONE_NUMBER=your_twilio_phone_number_here
 PORT=5050  # or any other port you want to use
 ```
 
@@ -86,11 +89,8 @@ The server will run on http://0.0.0.0:PORT, where PORT is specified in your .env
 
 Instructions on how to setup ngrok - [Ngrok Setup](https://ngrok.com/docs/getting-started/)
 
-
 **Add your Url and /incoming-call endpoint to an Active number of your choosing in Twilio**
 ![image](https://github.com/user-attachments/assets/9e5b1235-bc3c-41f6-af4b-590bf36ff0eb)
-
-
 
 **Example Replit Template**
 
@@ -100,3 +100,36 @@ You can easily fork and run this project on Replit using this link:
 
 Feel free to use and customize the template for your own project needs.
 
+**Initiating Outbound Calls**
+
+The application now supports initiating outbound calls through a POST request to the `/initiate-call` endpoint. Here's how to use it:
+
+1. Make a POST request to `https://your-domain/initiate-call` with a JSON body containing the destination phone number:
+
+```json
+{
+  "to": "+1234567890"
+}
+```
+
+2. The server will initiate a call to the specified number using your Twilio phone number.
+
+3. When the call connects, it will automatically connect to the AI assistant using the same WebSocket and OpenAI integration as incoming calls.
+
+Example using curl:
+
+```bash
+curl -X POST https://your-domain/initiate-call \
+     -H "Content-Type: application/json" \
+     -d '{"to": "+1234567890"}'
+```
+
+The response will include the call SID and status:
+
+```json
+{
+  "success": true,
+  "call_sid": "CA...",
+  "status": "queued"
+}
+```
