@@ -13,18 +13,16 @@ from twilio.rest import Client
 from dotenv import load_dotenv
 import logging
 import pprint
-import sys
-from datetime import datetime
 
-# Configure logging
+# Enhanced logging configuration
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    level=logging.INFO,  # Changed to INFO from DEBUG to reduce logging
+    format='%(asctime)s - %(levelname)s - %(name)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 # Configure websockets logging - reduce its verbosity
-logging.getLogger('websockets').setLevel(logging.INFO)
+logging.getLogger('websockets').setLevel(logging.INFO)  # Changed to INFO
 
 # This class filters out websocket text messages to reduce noise
 class WebSocketFilter(logging.Filter):
@@ -40,15 +38,6 @@ class WebSocketFilter(logging.Filter):
 # Add filter to websockets logger
 websockets_logger = logging.getLogger('websockets')
 websockets_logger.addFilter(WebSocketFilter())
-
-def log_conversation(event_type, data):
-    """Log important conversation events with relevant data"""
-    log_entry = {
-        "timestamp": datetime.utcnow().isoformat(),
-        "event_type": event_type,
-        "data": data
-    }
-    logger.info(json.dumps(log_entry))
 
 load_dotenv()
 # Configuration
@@ -169,7 +158,6 @@ TOOLS = [
 
 SYSTEM_MESSAGE = (
   "You are a helpful and bubbly AI assistant who answers any questions I ask. Your name is Gio and you work for Craft Commons. "
-  "As soon as the user first responds, be sure to call the get_course_categories function so that you know the course categories that we offer. You do not know any courses until you call this tool. "
   "If someone asks about course offerings, you MUST call the get_course_categories function. "
   "You can provide information about the weather when asked. "
   "When someone asks about the weather in a specific location, use the get_weather function to retrieve the information. "
@@ -464,20 +452,13 @@ async def send_course_signup_link(event_id, phone_number):
 
 async def handle_function_call(function_name, arguments, call_id):
     """Process function calls and return formatted results."""
+    logger.info(f"Handling function call: {function_name} with args: {arguments}")
+
     try:
         args = json.loads(arguments)
-        log_conversation("function_call", {
-            "function": function_name,
-            "arguments": args,
-            "call_id": call_id
-        })
     except json.JSONDecodeError:
         args = {}
-        log_conversation("function_call_error", {
-            "function": function_name,
-            "error": "JSONDecodeError",
-            "arguments": arguments
-        })
+        logger.error("Failed to parse function arguments")
 
     # Execute the requested function
     if function_name == "get_weather":
@@ -495,20 +476,6 @@ async def handle_function_call(function_name, arguments, call_id):
         )
     else:
         result = {"error": f"Unknown function: {function_name}"}
-
-    # Log the function result with more detail
-    log_conversation("function_result", {
-        "function": function_name,
-        "call_id": call_id,
-        "result": result,
-        "items_returned": {
-            "get_weather": lambda r: {"temperature": r.get("temperature"), "condition": r.get("condition")},
-            "get_course_categories": lambda r: {"categories": r.get("categories", [])},
-            "get_courses_by_category": lambda r: {"courses": r.get("courses", [])},
-            "get_course_dates": lambda r: {"events": r.get("events", [])},
-            "send_course_signup_link": lambda r: {"message": r.get("message")}
-        }.get(function_name, lambda r: r)(result)
-    })
 
     # Format according to API requirements
     return {
@@ -543,15 +510,9 @@ async def handle_incoming_call(request: Request):
 @app.websocket("/media-stream")
 async def handle_media_stream(websocket: WebSocket):
     """Handle WebSocket connections between Twilio and OpenAI."""
-    log_conversation("websocket_connect", {
-        "stream_sid": None,
-        "timestamp": datetime.utcnow().isoformat()
-    })
+    logger.info("Client connected to /media-stream endpoint")
     await websocket.accept()
-    log_conversation("websocket_accepted", {
-        "stream_sid": None,
-        "timestamp": datetime.utcnow().isoformat()
-    })
+    logger.info("WebSocket connection accepted")
 
     # Prepare OpenAI websocket connection
     openai_url = f'wss://api.openai.com/v1/realtime?model={MODEL}'
@@ -560,10 +521,7 @@ async def handle_media_stream(websocket: WebSocket):
         "OpenAI-Beta": "realtime=v1"
     }
     
-    log_conversation("openai_connect", {
-        "openai_url": openai_url,
-        "timestamp": datetime.utcnow().isoformat()
-    })
+    logger.info(f"Connecting to OpenAI Realtime API at: {openai_url}")
     
     try:
         async with websockets.connect(
@@ -571,10 +529,7 @@ async def handle_media_stream(websocket: WebSocket):
             additional_headers=additional_headers,
             close_timeout=10
         ) as openai_ws:
-            log_conversation("openai_connected", {
-                "stream_sid": None,
-                "timestamp": datetime.utcnow().isoformat()
-            })
+            logger.info("Successfully connected to OpenAI Realtime API")
             
             # Listen for and log the first message (often contains initialization info)
             initial_message = await log_full_message(openai_ws, "Initial message from OpenAI")
@@ -586,11 +541,7 @@ async def handle_media_stream(websocket: WebSocket):
             if initial_data and "session" in initial_data:
                 input_audio_format = initial_data["session"].get("input_audio_format", "pcm16")
                 output_audio_format = initial_data["session"].get("output_audio_format", "pcm16")
-                log_conversation("audio_format_detected", {
-                    "input_format": input_audio_format,
-                    "output_format": output_audio_format,
-                    "timestamp": datetime.utcnow().isoformat()
-                })
+                logger.info(f"Detected audio formats from OpenAI: input={input_audio_format}, output={output_audio_format}")
             
             # Now try to update the session
             try:
@@ -679,10 +630,7 @@ async def receive_from_twilio(websocket, openai_ws, shared_state):
     audio_counter = 0  # Counter to limit audio logging
     
     try:
-        log_conversation("twilio_receive_start", {
-            "stream_sid": shared_state.get("stream_sid"),
-            "timestamp": datetime.utcnow().isoformat()
-        })
+        logger.info("Starting to receive messages from Twilio")
         async for message in websocket.iter_text():
             data = json.loads(message)
             event_type = data.get('event')
@@ -697,114 +645,98 @@ async def receive_from_twilio(websocket, openai_ws, shared_state):
                 # Log only occasionally to reduce noise
                 audio_counter += 1
                 if audio_counter % 100 == 0:  # Log every 100th audio packet
-                    log_conversation("audio_packet_received", {
-                        "stream_sid": shared_state.get("stream_sid"),
-                        "audio_counter": audio_counter,
-                        "timestamp": datetime.utcnow().isoformat()
-                    })
+                    logger.debug(f"Received media packet #{audio_counter} from Twilio")
                 
                 try:
                     await openai_ws.send(json.dumps(audio_append))
                 except Exception as e:
-                    log_conversation("audio_send_error", {
-                        "stream_sid": shared_state.get("stream_sid"),
-                        "error": str(e),
-                        "timestamp": datetime.utcnow().isoformat()
-                    })
+                    logger.error(f"Error sending audio to OpenAI: {str(e)}")
                     raise
                     
             elif event_type == 'start':
                 shared_state["stream_sid"] = data['start']['streamSid']
-                log_conversation("stream_started", {
-                    "stream_sid": data['start']['streamSid'],
-                    "timestamp": datetime.utcnow().isoformat()
-                })
+                logger.info(f"Incoming stream has started {shared_state['stream_sid']}")
                 
             elif event_type == 'mark':
                 # Only log occasional marks
                 if len(shared_state["mark_queue"]) % 5 == 0:
-                    log_conversation("mark_event", {
-                        "stream_sid": shared_state.get("stream_sid"),
-                        "queue_size": len(shared_state["mark_queue"]),
-                        "timestamp": datetime.utcnow().isoformat()
-                    })
+                    logger.debug(f"Processing mark event (queue size: {len(shared_state['mark_queue'])})")
                 
             elif event_type == 'stop':
-                log_conversation("stream_stopped", {
-                    "stream_sid": shared_state.get("stream_sid"),
-                    "timestamp": datetime.utcnow().isoformat()
-                })
+                logger.info("Twilio call ended. Closing connections.")
                 await openai_ws.close()
                 return
             
             else:
-                log_conversation("unknown_event", {
-                    "stream_sid": shared_state.get("stream_sid"),
-                    "event_type": event_type,
-                    "timestamp": datetime.utcnow().isoformat()
-                })
+                logger.warning(f"Unknown event type from Twilio: {event_type}")
                 
     except WebSocketDisconnect:
-        log_conversation("websocket_disconnect", {
-            "stream_sid": shared_state.get("stream_sid"),
-            "timestamp": datetime.utcnow().isoformat()
-        })
+        logger.info("Twilio client disconnected.")
         await openai_ws.close()
     except Exception as e:
-        log_conversation("twilio_receive_error", {
-            "stream_sid": shared_state.get("stream_sid"),
-            "error": str(e),
-            "traceback": traceback.format_exc(),
-            "timestamp": datetime.utcnow().isoformat()
-        })
+        logger.error(f"Unexpected error in receive_from_twilio: {str(e)}")
+        logger.error(traceback.format_exc())
         await openai_ws.close()
+
 
 async def send_to_twilio(websocket, openai_ws, shared_state):
     """Receive events from the OpenAI Realtime API, send audio back to Twilio."""
     audio_sent_counter = 0  # Counter for audio packets sent
 
     try:
-        log_conversation("openai_receive_start", {
-            "stream_sid": shared_state.get("stream_sid"),
-            "timestamp": datetime.utcnow().isoformat()
-        })
-
+        logger.info("Starting to receive messages from OpenAI")
         async for openai_message in openai_ws:
             try:
                 response = json.loads(openai_message)
-
-                # 🔥 NEW: Handle function call outputs
-                if response.get("type") == "conversation.item.create" and response["item"].get("type") == "function_call_output":
-                    await openai_ws.send(json.dumps(response))
-                    await openai_ws.send(json.dumps({
-                        "type": "response.create"
-                    }))
-                    continue
-
                 response_type = response.get('type', 'unknown')
 
-                # Log important conversation events
+                # Log relevant events from OpenAI
+                if response_type in LOG_EVENT_TYPES:
+                    logger.info(f"Received event from OpenAI: {response_type}")
+
+                # Track the assistant item ID for interruption handling
+                if response.get('item_id'):
+                    shared_state["last_assistant_item"] = response['item_id']
+                    logger.debug(f"Updated last_assistant_item to: {response['item_id']}")
+
+                # Set timestamp when response starts (for interruption timing)
+                if response_type == 'response.audio.delta' and shared_state["response_start_timestamp_twilio"] is None:
+                    shared_state["response_start_timestamp_twilio"] = shared_state["latest_media_timestamp"]
+                    logger.debug(f"Set response_start_timestamp_twilio to: {shared_state['response_start_timestamp_twilio']}")
+
+                # Handle function calls in response.done
                 if response_type == 'response.done':
+                    logger.info("Processing response.done event")
                     output_items = response.get('response', {}).get('output', [])
+
                     for item in output_items:
-                        if item.get('type') == 'text':
-                            log_conversation("assistant_message", {
-                                "content": item.get('text', ''),
-                                "timestamp": datetime.utcnow().isoformat()
-                            })
-                        elif item.get('type') == 'function_call':
-                            log_conversation("assistant_function_call", {
-                                "function": item.get('name'),
-                                "arguments": item.get('arguments'),
-                                "call_id": item.get('call_id')
-                            })
+                        if item.get('type') == 'function_call':
+                            logger.info("Detected function call in response.done")
+                            function_name = item.get('name')
+                            function_args = item.get('arguments')
+                            call_id = item.get('call_id')
+
+                            # Process the function call
+                            function_result = await handle_function_call(
+                                function_name,
+                                function_args,
+                                call_id
+                            )
+
+                            # Send function result back to OpenAI
+                            await openai_ws.send(json.dumps(function_result))
+                            logger.info(f"Sent function result for call_id: {call_id}")
+
+                            # Trigger new response after sending function result
+                            await openai_ws.send(json.dumps({"type": "response.create"}))
+                            logger.info("Triggered new response after function result")
 
                 # Handle audio deltas (streamed audio responses)
                 elif response_type == 'response.audio.delta' and 'delta' in response:
                     try:
                         # Decode base64 audio payload
                         raw_audio = base64.b64decode(response['delta'])
-
+                        
                         # Re-encode for Twilio
                         audio_payload = base64.b64encode(raw_audio).decode('utf-8')
                         audio_delta = {
@@ -816,61 +748,40 @@ async def send_to_twilio(websocket, openai_ws, shared_state):
                         }
 
                         # Send audio to Twilio
-                        if shared_state["stream_sid"]:
+                        if not shared_state["stream_sid"]:
+                            logger.error("No stream_sid available - cannot send audio to Twilio")
+                        else:
                             await websocket.send_json(audio_delta)
                             audio_sent_counter += 1
-
+                            
                             # Send mark events for interruption handling
-                            if audio_sent_counter % 5 == 0:
+                            if audio_sent_counter % 5 == 0:  # Send mark every 5 audio packets
                                 await send_mark(websocket, shared_state)
                     except Exception as e:
-                        log_conversation("audio_processing_error", {
-                            "stream_sid": shared_state.get("stream_sid"),
-                            "error": str(e),
-                            "traceback": traceback.format_exc(),
-                            "timestamp": datetime.utcnow().isoformat()
-                        })
+                        logger.error(f"Error processing audio data: {str(e)}")
+                        logger.error(traceback.format_exc())
 
                 # Handle speech interruption events
                 elif response_type == 'input_audio_buffer.speech_started':
-                    log_conversation("speech_started", {
-                        "stream_sid": shared_state.get("stream_sid"),
-                        "timestamp": datetime.utcnow().isoformat()
-                    })
+                    logger.info("Speech started detected.")
                     if shared_state["last_assistant_item"]:
-                        log_conversation("interrupting_response", {
-                            "stream_sid": shared_state.get("stream_sid"),
-                            "item_id": shared_state["last_assistant_item"],
-                            "timestamp": datetime.utcnow().isoformat()
-                        })
+                        logger.info(f"Interrupting response with item ID: {shared_state['last_assistant_item']}")
                         await handle_speech_started_event(openai_ws, websocket, shared_state)
-
+                        
                         # Reset state after handling interruption
                         shared_state["last_assistant_item"] = None
                         shared_state["response_start_timestamp_twilio"] = None
                         shared_state["mark_queue"] = []
 
             except json.JSONDecodeError as e:
-                log_conversation("json_decode_error", {
-                    "stream_sid": shared_state.get("stream_sid"),
-                    "error": str(e),
-                    "raw_message": openai_message,
-                    "timestamp": datetime.utcnow().isoformat()
-                })
+                logger.error(f"Error decoding JSON from OpenAI: {str(e)}")
+                logger.error(f"Raw message: {openai_message}")
             except Exception as e:
-                log_conversation("openai_message_error", {
-                    "stream_sid": shared_state.get("stream_sid"),
-                    "error": str(e),
-                    "traceback": traceback.format_exc(),
-                    "timestamp": datetime.utcnow().isoformat()
-                })
+                logger.error(f"Error processing message from OpenAI: {str(e)}")
+                logger.error(traceback.format_exc())
     except Exception as e:
-        log_conversation("openai_receive_error", {
-            "stream_sid": shared_state.get("stream_sid"),
-            "error": str(e),
-            "traceback": traceback.format_exc(),
-            "timestamp": datetime.utcnow().isoformat()
-        })
+        logger.error(f"Error in send_to_twilio: {str(e)}")
+        logger.error(traceback.format_exc())
 
 async def handle_speech_started_event(openai_ws, websocket, shared_state):
     """Handle interruption when the caller's speech starts."""
@@ -965,10 +876,6 @@ async def initiate_call(request: Request):
         to_number = data.get('to')
         
         if not to_number:
-            log_conversation("call_initiation_error", {
-                "error": "Missing 'to' phone number in request body",
-                "timestamp": datetime.utcnow().isoformat()
-            })
             return {"error": "Missing 'to' phone number in request body"}
             
         # Get the host from the request
@@ -984,13 +891,6 @@ async def initiate_call(request: Request):
             url=twiml_url
         )
         
-        log_conversation("call_initiated", {
-            "call_sid": call.sid,
-            "status": call.status,
-            "to_number": to_number,
-            "timestamp": datetime.utcnow().isoformat()
-        })
-        
         return {
             "success": True,
             "call_sid": call.sid,
@@ -998,11 +898,8 @@ async def initiate_call(request: Request):
         }
         
     except Exception as e:
-        log_conversation("call_initiation_error", {
-            "error": str(e),
-            "traceback": traceback.format_exc(),
-            "timestamp": datetime.utcnow().isoformat()
-        })
+        logger.error(f"Error initiating call: {str(e)}")
+        logger.error(traceback.format_exc())
         return {"error": str(e)}
 
 
