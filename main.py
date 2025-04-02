@@ -13,16 +13,51 @@ from twilio.rest import Client
 from dotenv import load_dotenv
 import logging
 import pprint
+import sys
+from datetime import datetime
 
-# Enhanced logging configuration
-logging.basicConfig(
-    level=logging.INFO,  # Changed to INFO from DEBUG to reduce logging
-    format='%(asctime)s - %(levelname)s - %(name)s - %(message)s'
-)
+# Enhanced logging configuration with structured logging
+class StructuredFormatter(logging.Formatter):
+    def format(self, record):
+        # Create a structured log entry
+        log_entry = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "level": record.levelname,
+            "message": record.getMessage(),
+            "module": record.module,
+            "function": record.funcName,
+            "line": record.lineno
+        }
+        
+        # Add exception info if present
+        if record.exc_info:
+            log_entry["exception"] = self.formatException(record.exc_info)
+            
+        # Add extra fields if present
+        if hasattr(record, "extra"):
+            log_entry.update(record.extra)
+            
+        return json.dumps(log_entry)
+
+# Configure root logger
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+
+# Remove existing handlers
+for handler in root_logger.handlers[:]:
+    root_logger.removeHandler(handler)
+
+# Add console handler with structured formatting
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setFormatter(StructuredFormatter())
+root_logger.addHandler(console_handler)
+
+# Create logger for this module
 logger = logging.getLogger(__name__)
 
-# Configure websockets logging - reduce its verbosity
-logging.getLogger('websockets').setLevel(logging.INFO)  # Changed to INFO
+# Configure websockets logging
+websockets_logger = logging.getLogger('websockets')
+websockets_logger.setLevel(logging.INFO)
 
 # This class filters out websocket text messages to reduce noise
 class WebSocketFilter(logging.Filter):
@@ -36,8 +71,15 @@ class WebSocketFilter(logging.Filter):
         return True
 
 # Add filter to websockets logger
-websockets_logger = logging.getLogger('websockets')
 websockets_logger.addFilter(WebSocketFilter())
+
+# Add a function to log important events with extra context
+def log_event(event_type, message, extra=None):
+    """Helper function to log important events with structured data"""
+    if extra is None:
+        extra = {}
+    extra["event_type"] = event_type
+    logger.info(message, extra=extra)
 
 load_dotenv()
 # Configuration
@@ -452,13 +494,20 @@ async def send_course_signup_link(event_id, phone_number):
 
 async def handle_function_call(function_name, arguments, call_id):
     """Process function calls and return formatted results."""
-    logger.info(f"Handling function call: {function_name} with args: {arguments}")
+    log_event("function_call", f"Handling function call: {function_name}", {
+        "function_name": function_name,
+        "arguments": arguments,
+        "call_id": call_id
+    })
 
     try:
         args = json.loads(arguments)
     except json.JSONDecodeError:
         args = {}
-        logger.error("Failed to parse function arguments")
+        log_event("function_call_error", "Failed to parse function arguments", {
+            "error": "JSONDecodeError",
+            "arguments": arguments
+        })
 
     # Execute the requested function
     if function_name == "get_weather":
@@ -510,9 +559,9 @@ async def handle_incoming_call(request: Request):
 @app.websocket("/media-stream")
 async def handle_media_stream(websocket: WebSocket):
     """Handle WebSocket connections between Twilio and OpenAI."""
-    logger.info("Client connected to /media-stream endpoint")
+    log_event("websocket_connect", "Client connected to /media-stream endpoint")
     await websocket.accept()
-    logger.info("WebSocket connection accepted")
+    log_event("websocket_accepted", "WebSocket connection accepted")
 
     # Prepare OpenAI websocket connection
     openai_url = f'wss://api.openai.com/v1/realtime?model={MODEL}'
@@ -521,7 +570,7 @@ async def handle_media_stream(websocket: WebSocket):
         "OpenAI-Beta": "realtime=v1"
     }
     
-    logger.info(f"Connecting to OpenAI Realtime API at: {openai_url}")
+    log_event("openai_connect", f"Connecting to OpenAI Realtime API at: {openai_url}")
     
     try:
         async with websockets.connect(
@@ -529,7 +578,7 @@ async def handle_media_stream(websocket: WebSocket):
             additional_headers=additional_headers,
             close_timeout=10
         ) as openai_ws:
-            logger.info("Successfully connected to OpenAI Realtime API")
+            log_event("openai_connected", "Successfully connected to OpenAI Realtime API")
             
             # Listen for and log the first message (often contains initialization info)
             initial_message = await log_full_message(openai_ws, "Initial message from OpenAI")
@@ -541,7 +590,10 @@ async def handle_media_stream(websocket: WebSocket):
             if initial_data and "session" in initial_data:
                 input_audio_format = initial_data["session"].get("input_audio_format", "pcm16")
                 output_audio_format = initial_data["session"].get("output_audio_format", "pcm16")
-                logger.info(f"Detected audio formats from OpenAI: input={input_audio_format}, output={output_audio_format}")
+                log_event("audio_format_detected", "Detected audio formats from OpenAI", {
+                    "input_format": input_audio_format,
+                    "output_format": output_audio_format
+                })
             
             # Now try to update the session
             try:
@@ -876,6 +928,7 @@ async def initiate_call(request: Request):
         to_number = data.get('to')
         
         if not to_number:
+            log_event("call_initiation_error", "Missing phone number in request")
             return {"error": "Missing 'to' phone number in request body"}
             
         # Get the host from the request
@@ -891,6 +944,12 @@ async def initiate_call(request: Request):
             url=twiml_url
         )
         
+        log_event("call_initiated", "Successfully initiated call", {
+            "call_sid": call.sid,
+            "status": call.status,
+            "to_number": to_number
+        })
+        
         return {
             "success": True,
             "call_sid": call.sid,
@@ -898,8 +957,10 @@ async def initiate_call(request: Request):
         }
         
     except Exception as e:
-        logger.error(f"Error initiating call: {str(e)}")
-        logger.error(traceback.format_exc())
+        log_event("call_initiation_error", "Error initiating call", {
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        })
         return {"error": str(e)}
 
 
