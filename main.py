@@ -165,7 +165,7 @@ SYSTEM_MESSAGE = (
   "When someone asks about specific types of courses (like woodworking courses), use the get_courses_by_category function to get detailed information about those courses. "
   "When someone asks about course dates or scheduling: "
   "Whenever someone asks about course offerings or categories, you MUST call one of the tools."
-  "1. First, guide them to select a category (we specialize in woodworking). "
+  "1. First, call the get_course_categories tool and then guide them to select a category (we specialize in woodworking). "
   "2. Then help them choose a specific course from that category. "
   "3. Once they've selected a course, use the get_course_dates function to show them available dates. "
   "When someone wants to sign up for a course: "
