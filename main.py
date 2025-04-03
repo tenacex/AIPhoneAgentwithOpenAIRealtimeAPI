@@ -184,6 +184,7 @@ SYSTEM_MESSAGE = (
   "Keep your answers short. Please try and summarize and do not say more than 4 sentences in a row without asking another question. Your goal is to lead people into the proper course."
   "When you receive a response from send_course_signup_link, read the message field exactly as is and do not try to modify or interpret it. "
   "This is especially important for the demo message which should be read verbatim to the user."
+  "Do not forget, you do not know what courses we offer until you call the get_course_categories tool. DO not say we offer pottery or painting, or makeup things. You need to call the tool to find out. "
 )
 VOICE = 'verse'
 LOG_EVENT_TYPES = [
